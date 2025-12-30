@@ -1,0 +1,6 @@
+node_modules
+product-watcher
+*.db
+*.config.json
+
+teste
