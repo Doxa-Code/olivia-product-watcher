@@ -31,7 +31,7 @@ if [ -d "$WATCHER_HOME" ]; then
 fi
 
 echo -e "${YELLOW}${BOLD}Isso vai remover o watcher e todos os clientes.${NC}"
-read -p "Tem certeza? (s/N): " confirm
+read -p "Tem certeza? (s/N): " confirm </dev/tty
 
 if [[ ! "$confirm" =~ ^[Ss]$ ]]; then
     echo "Cancelado."
@@ -45,7 +45,7 @@ for dir in "$WATCHER_HOME"/*/; do
     [ -f "$dir/docker-compose.yml" ] || continue
     name=$(basename "$dir")
     echo "  Parando watcher-$name..."
-    (cd "$dir" && docker-compose down -v 2>/dev/null) || true
+    (cd "$dir" && docker compose down -v 2>/dev/null) || true
 done
 
 # Remove CLI

@@ -120,7 +120,7 @@ cmd_add() {
     # Build and start
     echo -e "\n${CYAN}▶ Iniciando container...${NC}"
     cd "$client_dir"
-    docker-compose up -d --build
+    docker compose up -d --build
 
     echo ""
     echo -e "${GREEN}════════════════════════════════════════${NC}"
@@ -185,7 +185,7 @@ cmd_logs() {
     fi
 
     cd "$client_dir"
-    docker-compose logs -f --tail=100
+    docker compose logs -f --tail=100
 }
 
 # Run sync
@@ -207,14 +207,14 @@ cmd_run() {
     cd "$client_dir"
 
     # Ensure container is running
-    if ! docker-compose ps --status running 2>/dev/null | grep -q watcher; then
+    if ! docker compose ps --status running 2>/dev/null | grep -q watcher; then
         echo -e "${YELLOW}Container não está rodando. Iniciando...${NC}"
-        docker-compose up -d
+        docker compose up -d
         sleep 2
     fi
 
     echo -e "${CYAN}Executando sync ($mode) para $name...${NC}"
-    docker-compose exec watcher bun run /app/watcher.ts --mode "$mode"
+    docker compose exec watcher bun run /app/watcher.ts --mode "$mode"
 }
 
 # Stop client
@@ -234,7 +234,7 @@ cmd_stop() {
 
     echo -e "${YELLOW}Parando $name...${NC}"
     cd "$client_dir"
-    docker-compose down
+    docker compose down
     echo -e "${GREEN}✓ Parado${NC}"
 }
 
@@ -255,7 +255,7 @@ cmd_start() {
 
     echo -e "${CYAN}Iniciando $name...${NC}"
     cd "$client_dir"
-    docker-compose up -d
+    docker compose up -d
     echo -e "${GREEN}✓ Iniciado${NC}"
 }
 
@@ -284,7 +284,7 @@ cmd_remove() {
 
     echo "Parando container..."
     cd "$client_dir"
-    docker-compose down -v 2>/dev/null || true
+    docker compose down -v 2>/dev/null || true
 
     echo "Removendo arquivos..."
     rm -rf "$client_dir"
@@ -316,15 +316,15 @@ cmd_config() {
         exit 1
     fi
 
-    # Recreate docker-compose
+    # Recreate docker compose
     create_docker_compose "$name" "$client_dir"
 
     # Restart if running
     cd "$client_dir"
     if docker ps -q -f "name=watcher-$name" 2>/dev/null | grep -q .; then
         echo -e "${CYAN}Reiniciando container...${NC}"
-        docker-compose down 2>/dev/null || true
-        docker-compose up -d --build
+        docker compose down 2>/dev/null || true
+        docker compose up -d --build
     fi
 
     echo -e "${GREEN}✓ Reconfigurado${NC}"
