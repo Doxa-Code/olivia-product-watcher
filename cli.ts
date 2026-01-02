@@ -21,14 +21,14 @@
 
 import Datastore from "@seald-io/nedb";
 import axios from "axios";
+import mysql from "mysql";
+import { execSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { execSync, spawn } from "node:child_process";
-import mysql from "mysql";
+import readline from "node:readline";
 import { Client } from "pg";
 import prompts from "prompts";
-import readline from "node:readline";
 
 // =============================================================================
 // Colors & Styles
@@ -173,12 +173,17 @@ const clientExists = (name: string): boolean => {
 };
 
 const sanitizeName = (name: string): string =>
-  name.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+  name
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9-]/g, "");
 
 const isDocker = (): boolean => {
   try {
-    return fs.existsSync("/.dockerenv") ||
-           fs.readFileSync("/proc/1/cgroup", "utf8").includes("docker");
+    return (
+      fs.existsSync("/.dockerenv") ||
+      fs.readFileSync("/proc/1/cgroup", "utf8").includes("docker")
+    );
   } catch {
     return false;
   }
@@ -229,12 +234,16 @@ const loadConfig = (envPath?: string): Config => {
     return val;
   };
 
-  const optional = (key: string, def: string): string => process.env[key] || def;
+  const optional = (key: string, def: string): string =>
+    process.env[key] || def;
 
   return {
     instanceName: optional("INSTANCE_NAME", "default"),
     source: {
-      type: optional("SOURCE_TYPE", "mysql5") as "mysql5" | "mysql8" | "postgres",
+      type: optional("SOURCE_TYPE", "mysql5") as
+        | "mysql5"
+        | "mysql8"
+        | "postgres",
       host: resolveHost(required("SOURCE_HOST")),
       port: parseInt(optional("SOURCE_PORT", "3306")),
       user: required("SOURCE_USER"),
@@ -280,7 +289,38 @@ const loadConfig = (envPath?: string): Config => {
 // Database Helpers
 // =============================================================================
 
-const testConnection = async (config: DbConfig): Promise<{ ok: boolean; error?: string }> => {
+const executeQueryMysql = async <T = any>(config: DbConfig, query: string) => {
+  return await new Promise<T[]>(async (r, t) => {
+    const conn = mysql.createConnection({
+      host: config.host,
+      port: config.port,
+      user: config.user,
+      password: config.password,
+      database: config.database || undefined,
+      insecureAuth: config.type === "mysql5",
+    });
+    conn.connect((err) => {
+      if (err) {
+        return t(err);
+      }
+      conn.query(query, (err, rows) => {
+        if (err) {
+          return t(err);
+        }
+        conn.end((err) => {
+          if (err) {
+            return t(err);
+          }
+          r(rows);
+        });
+      });
+    });
+  });
+};
+
+const testConnection = async (
+  config: DbConfig
+): Promise<{ ok: boolean; error?: string }> => {
   if (config.type === "postgres") {
     const client = new Client({
       host: config.host,
@@ -298,25 +338,29 @@ const testConnection = async (config: DbConfig): Promise<{ ok: boolean; error?: 
       return { ok: false, error: (e as Error).message };
     }
   } else {
-    return new Promise((resolve) => {
-      const conn = mysql.createConnection({
-        host: config.host,
-        port: config.port,
-        user: config.user,
-        password: config.password,
-        database: config.database,
-        connectTimeout: 10000,
-        insecureAuth: config.type === "mysql5",
+    try {
+      return await new Promise((r, t) => {
+        const conn = mysql.createConnection({
+          host: config.host,
+          port: config.port,
+          user: config.user,
+          password: config.password,
+          database: config.database,
+          connectTimeout: 10000,
+          insecureAuth: config.type === "mysql5",
+        });
+        conn.connect((err) => {
+          if (err) {
+            return t(err);
+          }
+          conn.end(() => {
+            r({ ok: true });
+          });
+        });
       });
-      conn.connect((err) => {
-        if (err) {
-          resolve({ ok: false, error: err.message });
-        } else {
-          conn.end();
-          resolve({ ok: true });
-        }
-      });
-    });
+    } catch (e) {
+      return { ok: false, error: (e as Error).message };
+    }
   }
 };
 
@@ -336,31 +380,27 @@ const listDatabases = async (config: DbConfig): Promise<string[]> => {
     await client.end();
     return result.rows.map((r: { datname: string }) => r.datname);
   } else {
-    return new Promise((resolve, reject) => {
-      const conn = mysql.createConnection({
-        host: config.host,
-        port: config.port,
-        user: config.user,
-        password: config.password,
-        insecureAuth: config.type === "mysql5",
-      });
-      conn.connect((err) => {
-        if (err) return reject(err);
-        conn.query("SHOW DATABASES", (err, rows: any[]) => {
-          conn.end();
-          if (err) return reject(err);
-          resolve(
-            rows
-              .map((r) => r.Database)
-              .filter((d: string) => !["information_schema", "mysql", "performance_schema", "sys"].includes(d))
-          );
-        });
-      });
-    });
+    const rows = await executeQueryMysql<{ Database: string }>(
+      config,
+      "SHOW DATABASES"
+    );
+    return rows
+      .map((r) => r.Database)
+      .filter(
+        (d: string) =>
+          ![
+            "information_schema",
+            "mysql",
+            "performance_schema",
+            "sys",
+          ].includes(d)
+      );
   }
 };
 
-const listTables = async (config: DbConfig & { database: string }): Promise<string[]> => {
+const listTables = async (
+  config: DbConfig & { database: string }
+): Promise<string[]> => {
   if (config.type === "postgres") {
     const client = new Client({
       host: config.host,
@@ -376,29 +416,15 @@ const listTables = async (config: DbConfig & { database: string }): Promise<stri
     await client.end();
     return result.rows.map((r: { tablename: string }) => r.tablename);
   } else {
-    return new Promise((resolve, reject) => {
-      const conn = mysql.createConnection({
-        host: config.host,
-        port: config.port,
-        user: config.user,
-        password: config.password,
-        database: config.database,
-        insecureAuth: config.type === "mysql5",
-      });
-      conn.connect((err) => {
-        if (err) return reject(err);
-        conn.query("SHOW TABLES", (err, rows: any[]) => {
-          conn.end();
-          if (err) return reject(err);
-          const key = Object.keys(rows[0] || {})[0];
-          resolve(rows.map((r) => r[key]));
-        });
-      });
-    });
+    const rows = await executeQueryMysql(config, "SHOW TABLES");
+    const key = Object.keys(rows[0] || {})[0];
+    return rows.map((r: any) => r[key]);
   }
 };
 
-const listColumns = async (config: DbConfig & { database: string; table: string }): Promise<string[]> => {
+const listColumns = async (
+  config: DbConfig & { database: string; table: string }
+): Promise<string[]> => {
   if (config.type === "postgres") {
     const client = new Client({
       host: config.host,
@@ -415,24 +441,11 @@ const listColumns = async (config: DbConfig & { database: string; table: string 
     await client.end();
     return result.rows.map((r: { column_name: string }) => r.column_name);
   } else {
-    return new Promise((resolve, reject) => {
-      const conn = mysql.createConnection({
-        host: config.host,
-        port: config.port,
-        user: config.user,
-        password: config.password,
-        database: config.database,
-        insecureAuth: config.type === "mysql5",
-      });
-      conn.connect((err) => {
-        if (err) return reject(err);
-        conn.query(`SHOW COLUMNS FROM \`${config.table}\``, (err, rows: any[]) => {
-          conn.end();
-          if (err) return reject(err);
-          resolve(rows.map((r) => r.Field));
-        });
-      });
-    });
+    const rows = await executeQueryMysql(
+      config,
+      `SHOW COLUMNS FROM \`${config.table}\``
+    );
+    return rows.map((r: any) => r.Field);
   }
 };
 
@@ -448,7 +461,9 @@ const listWorkspaces = async (): Promise<Workspace[]> => {
 
   try {
     await client.connect();
-    const result = await client.query("SELECT id, name FROM public.workspaces ORDER BY name");
+    const result = await client.query(
+      "SELECT id, name FROM public.workspaces ORDER BY name"
+    );
     await client.end();
     return result.rows.map((r: { id: string; name: string }) => ({
       id: r.id,
@@ -515,7 +530,7 @@ class HashCache {
 
   async load(): Promise<number> {
     const docs = await this.store.findAsync({});
-    for (const doc of docs as HashEntry[]) {
+    for (const doc of docs as unknown as HashEntry[]) {
       this.cache.set(doc.id, {
         id: doc.id,
         hash: doc.hash,
@@ -556,12 +571,18 @@ class HashCache {
 // External APIs
 // =============================================================================
 
-const fetchJinaDescription = async (code: string, apiKey: string): Promise<string | null> => {
+const fetchJinaDescription = async (
+  code: string,
+  apiKey: string
+): Promise<string | null> => {
   try {
-    const resp = await axios.get(`https://r.jina.ai/https://go-upc.com/search?q=${code}`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-      timeout: 10000,
-    });
+    const resp = await axios.get(
+      `https://r.jina.ai/https://go-upc.com/search?q=${code}`,
+      {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        timeout: 10000,
+      }
+    );
 
     const match = resp.data.match(/(?<=^Title:\s)([^\n]+)/m);
     if (!match) return null;
@@ -578,7 +599,10 @@ const fetchJinaDescription = async (code: string, apiKey: string): Promise<strin
   }
 };
 
-const generateEmbeddings = async (texts: string[], config: Config): Promise<number[][]> => {
+const generateEmbeddings = async (
+  texts: string[],
+  config: Config
+): Promise<number[][]> => {
   const resp = await axios.post(
     config.azure.endpoint,
     { input: texts, dimension: 1536 },
@@ -613,23 +637,6 @@ const buildQuery = (config: Config): string => {
 // Database Connections
 // =============================================================================
 
-const createSourceConnection = (config: Config): mysql.Connection => {
-  const opts: mysql.ConnectionConfig = {
-    host: config.source.host,
-    port: config.source.port,
-    user: config.source.user,
-    password: config.source.password,
-    database: config.source.database,
-    connectTimeout: 30000,
-  };
-
-  if (config.source.type === "mysql5") {
-    opts.insecureAuth = true;
-  }
-
-  return mysql.createConnection(opts);
-};
-
 const createDestClient = async (): Promise<Client> => {
   const client = new Client({
     host: DEST_CONFIG.host,
@@ -647,7 +654,10 @@ const createDestClient = async (): Promise<Client> => {
 // Sync Engine
 // =============================================================================
 
-const runSync = async (config: Config, mode: "full" | "quick"): Promise<void> => {
+const runSync = async (
+  config: Config,
+  mode: "full" | "quick"
+): Promise<void> => {
   const startTime = Date.now();
   const dataDir = `./${config.instanceName}`;
 
@@ -661,43 +671,25 @@ const runSync = async (config: Config, mode: "full" | "quick"): Promise<void> =>
   const existingHashes = await hashCache.load();
   log.info(`Loaded hash cache`, { entries: existingHashes });
 
-  log.info(`Connecting to source...`, { host: config.source.host, port: config.source.port });
-  const source = createSourceConnection(config);
-
-  try {
-    await new Promise<void>((resolve, reject) => {
-      source.connect((err) => {
-        if (err) {
-          log.error(`Source connection failed`, {
-            error: err.message,
-            code: err.code,
-            errno: err.errno,
-          });
-          reject(err);
-        } else {
-          resolve();
-        }
-      });
-    });
-  } catch (e) {
-    const err = e as any;
-    throw new Error(`Failed to connect to source database: ${err.message || err.code || "Unknown error"}`);
-  }
-
-  log.info(`Connected to source`, { host: config.source.host, db: config.source.database });
-
-  const countResult = await new Promise<number>((resolve, reject) => {
-    source.query(`SELECT COUNT(*) as total FROM ${config.source.table}`, (err, rows: any) => {
-      err ? reject(err) : resolve(rows[0].total);
-    });
+  log.info(`Connecting to source...`, {
+    host: config.source.host,
+    port: config.source.port,
   });
+
+  log.info(`Connected to source`, {
+    host: config.source.host,
+    db: config.source.database,
+  });
+
+  const countRows = await executeQueryMysql(
+    config.source,
+    `SELECT COUNT(*) as total FROM ${config.source.table}`
+  );
+  const countResult = Number(countRows[0].total);
   log.info(`Total products in source`, { count: countResult });
 
   const query = buildQuery(config);
-  const allRows = await new Promise<any[]>((resolve, reject) => {
-    source.query(query, (err, rows) => (err ? reject(err) : resolve(rows)));
-  });
-  source.end();
+  const allRows = await executeQueryMysql(config.source, query);
   log.info(`Fetched all products`, { count: allRows.length });
 
   const staleMs = config.staleMinutes * 60 * 1000;
@@ -726,7 +718,9 @@ const runSync = async (config: Config, mode: "full" | "quick"): Promise<void> =>
     }
 
     const price = Number(row[cols.price]) * 100;
-    const promoPrice = cols.promotionPrice ? Number(row[cols.promotionPrice]) * 100 : null;
+    const promoPrice = cols.promotionPrice
+      ? Number(row[cols.promotionPrice]) * 100
+      : null;
     const hasPromo = promoPrice && promoPrice !== price;
 
     const description = sanitize(row[cols.description]);
@@ -738,15 +732,23 @@ const runSync = async (config: Config, mode: "full" | "quick"): Promise<void> =>
         id: productId,
         workspace_id: config.workspaceId,
         description,
-        display_name: cols.displayName ? sanitize(row[cols.displayName]) : description,
+        display_name: cols.displayName
+          ? sanitize(row[cols.displayName])
+          : description,
         code: String(row[cols.code] || ""),
-        manufactory: cols.manufactory ? String(row[cols.manufactory] || "") : "",
+        manufactory: cols.manufactory
+          ? String(row[cols.manufactory] || "")
+          : "",
         price,
         stock: cols.stock ? Number(row[cols.stock]) || 0 : 0,
         promotion_price: hasPromo ? promoPrice : null,
         promotion_start: hasPromo ? new Date() : null,
-        promotion_end: hasPromo ? new Date(Date.now() + 10 * 365 * 24 * 60 * 60 * 1000) : null,
-        need_prescription: cols.needPrescription ? row[cols.needPrescription] === 1 : false,
+        promotion_end: hasPromo
+          ? new Date(Date.now() + 10 * 365 * 24 * 60 * 60 * 1000)
+          : null,
+        need_prescription: cols.needPrescription
+          ? row[cols.needPrescription] === 1
+          : false,
       },
     });
   }
@@ -766,14 +768,21 @@ const runSync = async (config: Config, mode: "full" | "quick"): Promise<void> =>
 
   const newProducts = products.filter((p) => p.status === "new");
   if (config.jina && newProducts.length > 0) {
-    log.info(`Starting Jina lookups`, { count: newProducts.length, concurrency: config.jina.concurrency });
+    log.info(`Starting Jina lookups`, {
+      count: newProducts.length,
+      concurrency: config.jina.concurrency,
+    });
 
-    const descriptions = await new ParallelPool(newProducts, config.jina.concurrency, async (p, i) => {
-      if (i % 50 === 0) {
-        log.progress(i, newProducts.length, "Jina lookups");
+    const descriptions = await new ParallelPool(
+      newProducts,
+      config.jina.concurrency,
+      async (p, i) => {
+        if (i % 50 === 0) {
+          log.progress(i, newProducts.length, "Jina lookups");
+        }
+        return fetchJinaDescription(p.product.code, config.jina!.apiKey);
       }
-      return fetchJinaDescription(p.product.code, config.jina!.apiKey);
-    }).run();
+    ).run();
 
     for (let i = 0; i < newProducts.length; i++) {
       if (descriptions[i]) {
@@ -781,24 +790,38 @@ const runSync = async (config: Config, mode: "full" | "quick"): Promise<void> =>
       }
     }
 
-    log.info(`Jina lookups complete`, { found: descriptions.filter(Boolean).length });
+    log.info(`Jina lookups complete`, {
+      found: descriptions.filter(Boolean).length,
+    });
   }
 
   const needEmbedding = products.filter((p) => p.status === "new");
-  log.info(`Generating embeddings`, { count: needEmbedding.length, batchSize: config.batchSize });
+  log.info(`Generating embeddings`, {
+    count: needEmbedding.length,
+    batchSize: config.batchSize,
+  });
 
   for (let i = 0; i < needEmbedding.length; i += config.batchSize) {
     const batch = needEmbedding.slice(i, i + config.batchSize);
-    const texts = batch.map((p) => p.product.display_name || p.product.description);
+    const texts = batch.map(
+      (p) => p.product.display_name || p.product.description
+    );
 
     try {
       const embeddings = await generateEmbeddings(texts, config);
       for (let j = 0; j < batch.length; j++) {
         batch[j].embedding = embeddings[j];
       }
-      log.progress(Math.min(i + config.batchSize, needEmbedding.length), needEmbedding.length, "embeddings generated");
+      log.progress(
+        Math.min(i + config.batchSize, needEmbedding.length),
+        needEmbedding.length,
+        "embeddings generated"
+      );
     } catch (e) {
-      log.error(`Embedding batch failed`, { batch: i, error: (e as Error).message });
+      log.error(`Embedding batch failed`, {
+        batch: i,
+        error: (e as Error).message,
+      });
     }
   }
 
@@ -806,10 +829,14 @@ const runSync = async (config: Config, mode: "full" | "quick"): Promise<void> =>
   log.info(`Connected to destination`);
 
   const withEmbedding = products.filter((p) => p.embedding);
-  const withoutEmbedding = products.filter((p) => !p.embedding && p.status === "changed");
+  const withoutEmbedding = products.filter(
+    (p) => !p.embedding && p.status === "changed"
+  );
 
   if (withEmbedding.length > 0) {
-    log.info(`Upserting products with embeddings`, { count: withEmbedding.length });
+    log.info(`Upserting products with embeddings`, {
+      count: withEmbedding.length,
+    });
 
     for (let i = 0; i < withEmbedding.length; i += config.batchSize) {
       const batch = withEmbedding.slice(i, i + config.batchSize);
@@ -836,7 +863,21 @@ const runSync = async (config: Config, mode: "full" | "quick"): Promise<void> =>
            manufactory = EXCLUDED.manufactory, price = EXCLUDED.price, promotion_price = EXCLUDED.promotion_price,
            promotion_start = EXCLUDED.promotion_start, promotion_end = EXCLUDED.promotion_end, stock = EXCLUDED.stock,
            need_prescription = EXCLUDED.need_prescription, embedding = EXCLUDED.embedding`,
-        [ids, workspaceIds, descriptions, displayNames, codes, manufactories, prices, promosPrices, promosStarts, promosEnds, stocks, prescriptions, embeddings]
+        [
+          ids,
+          workspaceIds,
+          descriptions,
+          displayNames,
+          codes,
+          manufactories,
+          prices,
+          promosPrices,
+          promosStarts,
+          promosEnds,
+          stocks,
+          prescriptions,
+          embeddings,
+        ]
       );
 
       // Persist hashes immediately after successful batch insert
@@ -845,12 +886,18 @@ const runSync = async (config: Config, mode: "full" | "quick"): Promise<void> =>
       }
       await hashCache.persist();
 
-      log.progress(Math.min(i + config.batchSize, withEmbedding.length), withEmbedding.length, "upserted with embedding");
+      log.progress(
+        Math.min(i + config.batchSize, withEmbedding.length),
+        withEmbedding.length,
+        "upserted with embedding"
+      );
     }
   }
 
   if (withoutEmbedding.length > 0) {
-    log.info(`Updating products (data only)`, { count: withoutEmbedding.length });
+    log.info(`Updating products (data only)`, {
+      count: withoutEmbedding.length,
+    });
 
     for (let i = 0; i < withoutEmbedding.length; i += config.batchSize) {
       const batch = withoutEmbedding.slice(i, i + config.batchSize);
@@ -876,7 +923,20 @@ const runSync = async (config: Config, mode: "full" | "quick"): Promise<void> =>
          FROM (SELECT * FROM UNNEST($1::text[], $2::uuid[], $3::text[], $4::text[], $5::text[], $6::text[], $7::numeric[], $8::numeric[], $9::timestamp[], $10::timestamp[], $11::int[], $12::boolean[])
            AS t(id, workspace_id, description, display_name, code, manufactory, price, promotion_price, promotion_start, promotion_end, stock, need_prescription)) AS u
          WHERE p.id = u.id AND p.workspace_id = u.workspace_id`,
-        [ids, workspaceIds, descriptions, displayNames, codes, manufactories, prices, promosPrices, promosStarts, promosEnds, stocks, prescriptions]
+        [
+          ids,
+          workspaceIds,
+          descriptions,
+          displayNames,
+          codes,
+          manufactories,
+          prices,
+          promosPrices,
+          promosStarts,
+          promosEnds,
+          stocks,
+          prescriptions,
+        ]
       );
 
       // Persist hashes immediately after successful batch update
@@ -885,7 +945,11 @@ const runSync = async (config: Config, mode: "full" | "quick"): Promise<void> =>
       }
       await hashCache.persist();
 
-      log.progress(Math.min(i + config.batchSize, withoutEmbedding.length), withoutEmbedding.length, "updated (data only)");
+      log.progress(
+        Math.min(i + config.batchSize, withoutEmbedding.length),
+        withoutEmbedding.length,
+        "updated (data only)"
+      );
     }
   }
 
@@ -932,7 +996,10 @@ const runDaemon = async (): Promise<void> => {
       await runSync(config, "full");
       lastFullRun = Date.now();
       lastQuickRun = Date.now();
-    } else if (config.cron.quickInterval > 0 && now - lastQuickRun >= quickIntervalMs) {
+    } else if (
+      config.cron.quickInterval > 0 &&
+      now - lastQuickRun >= quickIntervalMs
+    ) {
       log.info(`Scheduled quick sync`);
       await runSync(config, "quick");
       lastQuickRun = Date.now();
@@ -961,16 +1028,23 @@ const printBanner = (clientName: string) => {
 
 const printSection = (title: string, subtitle?: string) => {
   console.log();
-  console.log(`  ${c.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}`);
+  console.log(
+    `  ${c.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}`
+  );
   console.log(`  ${style.title(title)}`);
   if (subtitle) {
     console.log(`  ${style.subtitle(subtitle)}`);
   }
-  console.log(`  ${c.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}`);
+  console.log(
+    `  ${c.cyan}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${c.reset}`
+  );
   console.log();
 };
 
-const runWizard = async (clientName: string, clientDir: string): Promise<boolean> => {
+const runWizard = async (
+  clientName: string,
+  clientDir: string
+): Promise<boolean> => {
   printBanner(clientName);
 
   const onCancel = () => {
@@ -989,9 +1063,21 @@ const runWizard = async (clientName: string, clientDir: string): Promise<boolean
       name: "type",
       message: "Tipo do banco de dados",
       choices: [
-        { title: `${c.green}●${c.reset} MySQL 5.x`, description: "Versão antiga com autenticação insegura", value: "mysql5" },
-        { title: `${c.blue}●${c.reset} MySQL 8.x`, description: "Versão moderna com caching_sha2", value: "mysql8" },
-        { title: `${c.magenta}●${c.reset} PostgreSQL`, description: "Banco PostgreSQL", value: "postgres" },
+        {
+          title: `${c.green}●${c.reset} MySQL 5.x`,
+          description: "Versão antiga com autenticação insegura",
+          value: "mysql5",
+        },
+        {
+          title: `${c.blue}●${c.reset} MySQL 8.x`,
+          description: "Versão moderna com caching_sha2",
+          value: "mysql8",
+        },
+        {
+          title: `${c.magenta}●${c.reset} PostgreSQL`,
+          description: "Banco PostgreSQL",
+          value: "postgres",
+        },
       ],
       initial: 0,
     },
@@ -1007,7 +1093,12 @@ const runWizard = async (clientName: string, clientDir: string): Promise<boolean
     [
       { type: "text", name: "host", message: "Host", initial: "localhost" },
       { type: "number", name: "port", message: "Porta", initial: defaultPort },
-      { type: "text", name: "user", message: "Usuário", validate: (v) => v.length > 0 || "Obrigatório" },
+      {
+        type: "text",
+        name: "user",
+        message: "Usuário",
+        validate: (v) => v.length > 0 || "Obrigatório",
+      },
       { type: "password", name: "password", message: "Senha" },
     ],
     { onCancel }
@@ -1038,7 +1129,10 @@ const runWizard = async (clientName: string, clientDir: string): Promise<boolean
   console.log(` ${style.check}`);
 
   // STEP 4: Select Database
-  printSection("3. Selecione o Database", "Escolha ou digite o nome do database");
+  printSection(
+    "3. Selecione o Database",
+    "Escolha ou digite o nome do database"
+  );
 
   process.stdout.write(`  ${style.info("▶")} Carregando databases...`);
   let databases: string[] = [];
@@ -1047,7 +1141,11 @@ const runWizard = async (clientName: string, clientDir: string): Promise<boolean
     console.log(` ${style.check} (${databases.length} encontrados)`);
   } catch {
     console.log(` ${style.cross}`);
-    console.log(`  ${style.warn("Não foi possível listar databases. Digite manualmente.")}`);
+    console.log(
+      `  ${style.warn(
+        "Não foi possível listar databases. Digite manualmente."
+      )}`
+    );
   }
   console.log();
 
@@ -1057,7 +1155,10 @@ const runWizard = async (clientName: string, clientDir: string): Promise<boolean
       name: "database",
       message: "Database",
       choices: databases.map((d) => ({ title: d, value: d })),
-      suggest: (input, choices) => choices.filter((c) => c.title.toLowerCase().includes(input.toLowerCase())),
+      suggest: (input, choices) =>
+        choices.filter((c) =>
+          c.title.toLowerCase().includes(input.toLowerCase())
+        ) as any,
       validate: (v) => v.length > 0 || "Obrigatório",
     },
     { onCancel }
@@ -1071,9 +1172,12 @@ const runWizard = async (clientName: string, clientDir: string): Promise<boolean
   try {
     tables = await listTables({ ...dbConfig, database: dbRes.database });
     console.log(` ${style.check} (${tables.length} encontradas)`);
-  } catch {
+  } catch (err) {
+    console.log(err);
     console.log(` ${style.cross}`);
-    console.log(`  ${style.warn("Não foi possível listar tabelas. Digite manualmente.")}`);
+    console.log(
+      `  ${style.warn("Não foi possível listar tabelas. Digite manualmente.")}`
+    );
   }
   console.log();
 
@@ -1083,35 +1187,56 @@ const runWizard = async (clientName: string, clientDir: string): Promise<boolean
       name: "table",
       message: "Tabela de produtos",
       choices: tables.map((t) => ({ title: t, value: t })),
-      suggest: (input, choices) => choices.filter((c) => c.title.toLowerCase().includes(input.toLowerCase())),
+      suggest: (input, choices) =>
+        choices.filter((c) =>
+          c.title.toLowerCase().includes(input.toLowerCase())
+        ) as any,
       validate: (v) => v.length > 0 || "Obrigatório",
     },
     { onCancel }
   );
 
   // STEP 6: Column Mapping
-  printSection("5. Mapeamento de Colunas", "Qual coluna corresponde a cada campo");
+  printSection(
+    "5. Mapeamento de Colunas",
+    "Qual coluna corresponde a cada campo"
+  );
 
   process.stdout.write(`  ${style.info("▶")} Carregando colunas...`);
   let columns: string[] = [];
   try {
-    columns = await listColumns({ ...dbConfig, database: dbRes.database, table: tableRes.table });
+    columns = await listColumns({
+      ...dbConfig,
+      database: dbRes.database,
+      table: tableRes.table,
+    });
     console.log(` ${style.check} (${columns.length} encontradas)`);
   } catch {
     console.log(` ${style.cross}`);
-    console.log(`  ${style.warn("Não foi possível listar colunas. Digite manualmente.")}`);
+    console.log(
+      `  ${style.warn("Não foi possível listar colunas. Digite manualmente.")}`
+    );
   }
   console.log();
 
   const columnChoices = columns.map((col) => ({ title: col, value: col }));
 
-  const makeColumnPrompt = (name: string, label: string, required: boolean) => ({
+  const makeColumnPrompt = (
+    name: string,
+    label: string,
+    required: boolean
+  ) => ({
     type: columns.length > 0 ? ("autocomplete" as const) : ("text" as const),
     name,
     message: `${label}${required ? "" : " (opcional)"}`,
     choices: columnChoices,
-    suggest: (input: string, choices: any[]) => choices.filter((c) => c.title.toLowerCase().includes(input.toLowerCase())),
-    validate: required ? (v: string) => v.length > 0 || "Obrigatório" : undefined,
+    suggest: (input: string, choices: any[]) =>
+      choices.filter((c) =>
+        c.title.toLowerCase().includes(input.toLowerCase())
+      ),
+    validate: required
+      ? (v: string) => v.length > 0 || "Obrigatório"
+      : undefined,
   });
 
   console.log(`  ${style.subtitle("Colunas obrigatórias:")}`);
@@ -1123,7 +1248,7 @@ const runWizard = async (clientName: string, clientDir: string): Promise<boolean
       makeColumnPrompt("desc", "Descrição", true),
       makeColumnPrompt("code", "Código de barras", true),
       makeColumnPrompt("price", "Preço", true),
-    ],
+    ] as any,
     { onCancel }
   );
 
@@ -1138,7 +1263,7 @@ const runWizard = async (clientName: string, clientDir: string): Promise<boolean
       makeColumnPrompt("stock", "Estoque", false),
       makeColumnPrompt("promoPrice", "Preço promoção", false),
       makeColumnPrompt("needPrescription", "Precisa receita (0/1)", false),
-    ],
+    ] as any,
     { onCancel }
   );
 
@@ -1152,7 +1277,11 @@ const runWizard = async (clientName: string, clientDir: string): Promise<boolean
     console.log(` ${style.check} (${workspaces.length} encontrados)`);
   } catch {
     console.log(` ${style.cross}`);
-    console.log(`  ${style.warn("Não foi possível listar workspaces. Digite o UUID manualmente.")}`);
+    console.log(
+      `  ${style.warn(
+        "Não foi possível listar workspaces. Digite o UUID manualmente."
+      )}`
+    );
   }
   console.log();
 
@@ -1172,7 +1301,11 @@ const runWizard = async (clientName: string, clientDir: string): Promise<boolean
         message: "Selecione o Workspace",
         choices: workspaceChoices,
         suggest: (input, choices) =>
-          choices.filter((c) => c.title.toLowerCase().includes(input.toLowerCase()) || c.description?.toLowerCase().includes(input.toLowerCase())),
+          choices.filter(
+            (c) =>
+              c.title.toLowerCase().includes(input.toLowerCase()) ||
+              c.description?.toLowerCase().includes(input.toLowerCase())
+          ) as any,
       },
       { onCancel }
     );
@@ -1184,7 +1317,8 @@ const runWizard = async (clientName: string, clientDir: string): Promise<boolean
         message: "Workspace ID (UUID)",
         validate: (v) => {
           if (!v) return "Obrigatório";
-          const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+          const uuidRegex =
+            /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
           return uuidRegex.test(v) || "Formato UUID inválido";
         },
       },
@@ -1215,7 +1349,10 @@ const runWizard = async (clientName: string, clientDir: string): Promise<boolean
   const syncRes = { ...workspaceRes, ...azureRes };
 
   // STEP 8: Jina (Optional)
-  printSection("7. Busca de Descrições (Jina)", "Opcional: melhora descrições de produtos");
+  printSection(
+    "7. Busca de Descrições (Jina)",
+    "Opcional: melhora descrições de produtos"
+  );
 
   const jinaRes = await prompts(
     [
@@ -1235,7 +1372,10 @@ const runWizard = async (clientName: string, clientDir: string): Promise<boolean
   );
 
   // STEP 9: Cron Schedule
-  printSection("8. Agendamento de Sync", "Intervalos para sincronização automática");
+  printSection(
+    "8. Agendamento de Sync",
+    "Intervalos para sincronização automática"
+  );
 
   const cronRes = await prompts(
     [
@@ -1287,14 +1427,34 @@ COL_ID=${requiredCols.id}
 COL_DESC=${requiredCols.desc}
 COL_CODE=${requiredCols.code}
 COL_PRICE=${requiredCols.price}
-${optionalCols.displayName ? `COL_DISPLAY_NAME=${optionalCols.displayName}` : "# COL_DISPLAY_NAME="}
-${optionalCols.manufactory ? `COL_MANUFACTORY=${optionalCols.manufactory}` : "# COL_MANUFACTORY="}
+${
+  optionalCols.displayName
+    ? `COL_DISPLAY_NAME=${optionalCols.displayName}`
+    : "# COL_DISPLAY_NAME="
+}
+${
+  optionalCols.manufactory
+    ? `COL_MANUFACTORY=${optionalCols.manufactory}`
+    : "# COL_MANUFACTORY="
+}
 ${optionalCols.stock ? `COL_STOCK=${optionalCols.stock}` : "# COL_STOCK="}
-${optionalCols.promoPrice ? `COL_PROMO_PRICE=${optionalCols.promoPrice}` : "# COL_PROMO_PRICE="}
-${optionalCols.needPrescription ? `COL_PRESCRIPTION=${optionalCols.needPrescription}` : "# COL_PRESCRIPTION="}
+${
+  optionalCols.promoPrice
+    ? `COL_PROMO_PRICE=${optionalCols.promoPrice}`
+    : "# COL_PROMO_PRICE="
+}
+${
+  optionalCols.needPrescription
+    ? `COL_PRESCRIPTION=${optionalCols.needPrescription}`
+    : "# COL_PRESCRIPTION="
+}
 
 # Jina (Busca de Descrições)
-${jinaRes.enableJina && jinaRes.jinaApiKey ? `JINA_API_KEY=${jinaRes.jinaApiKey}` : "# JINA_API_KEY="}
+${
+  jinaRes.enableJina && jinaRes.jinaApiKey
+    ? `JINA_API_KEY=${jinaRes.jinaApiKey}`
+    : "# JINA_API_KEY="
+}
 JINA_CONCURRENCY=5
 
 # Performance
@@ -1313,7 +1473,9 @@ CRON_FULL_MINUTES=${cronRes.fullMinutes}
   const configPath = path.join(clientDir, "config.env");
   fs.writeFileSync(configPath, configContent);
 
-  console.log(`  ${style.check} Configuração salva em ${style.highlight(configPath)}`);
+  console.log(
+    `  ${style.check} Configuração salva em ${style.highlight(configPath)}`
+  );
   console.log();
 
   // SUCCESS
@@ -1331,7 +1493,8 @@ CRON_FULL_MINUTES=${cronRes.fullMinutes}
 // Docker Compose Generator
 // =============================================================================
 
-const DOCKER_IMAGE = process.env.WATCHER_IMAGE || "ghcr.io/doxacode/watcher:latest";
+const DOCKER_IMAGE =
+  process.env.WATCHER_IMAGE || "ghcr.io/doxacode/watcher:latest";
 
 const createDockerCompose = (name: string, clientDir: string): void => {
   const content = `services:
@@ -1391,7 +1554,10 @@ const cmdList = () => {
 
   const dirs = fs.readdirSync(WATCHER_DIR).filter((d) => {
     const fullPath = path.join(WATCHER_DIR, d);
-    return fs.statSync(fullPath).isDirectory() && fs.existsSync(path.join(fullPath, "config.env"));
+    return (
+      fs.statSync(fullPath).isDirectory() &&
+      fs.existsSync(path.join(fullPath, "config.env"))
+    );
   });
 
   if (dirs.length === 0) {
@@ -1405,7 +1571,9 @@ const cmdList = () => {
 
   for (const name of dirs) {
     try {
-      const result = execSync(`docker ps -q -f "name=watcher-${name}"`, { encoding: "utf-8" }).trim();
+      const result = execSync(`docker ps -q -f "name=watcher-${name}"`, {
+        encoding: "utf-8",
+      }).trim();
       if (result) {
         console.log(`  ${name.padEnd(25)} ${c.green}● rodando${c.reset}`);
       } else {
@@ -1450,7 +1618,10 @@ const cmdAdd = async (name: string) => {
   console.log(`\n${c.cyan}▶ Iniciando container...${c.reset}`);
 
   try {
-    execSync("docker compose up -d --build", { cwd: clientDir, stdio: "inherit" });
+    execSync("docker compose up -d --build", {
+      cwd: clientDir,
+      stdio: "inherit",
+    });
   } catch {
     console.error(`${c.red}Erro ao iniciar container${c.reset}`);
     process.exit(1);
@@ -1486,7 +1657,10 @@ const cmdLogs = (name: string) => {
   const clientDir = getClientDir(name);
 
   try {
-    execSync("docker compose logs -f --tail=100", { cwd: clientDir, stdio: "inherit" });
+    execSync("docker compose logs -f --tail=100", {
+      cwd: clientDir,
+      stdio: "inherit",
+    });
   } catch {
     // User pressed Ctrl+C
   }
@@ -1507,13 +1681,18 @@ const cmdRun = (name: string, mode: string = "full") => {
 
   // Check if container is running
   try {
-    const result = execSync(`docker compose ps --status running 2>/dev/null | grep watcher`, {
-      cwd: clientDir,
-      encoding: "utf-8",
-    });
+    const result = execSync(
+      `docker compose ps --status running 2>/dev/null | grep watcher`,
+      {
+        cwd: clientDir,
+        encoding: "utf-8",
+      }
+    );
     if (!result) throw new Error("not running");
   } catch {
-    console.log(`${c.yellow}Container não está rodando. Iniciando...${c.reset}`);
+    console.log(
+      `${c.yellow}Container não está rodando. Iniciando...${c.reset}`
+    );
     execSync("docker compose up -d", { cwd: clientDir, stdio: "inherit" });
     execSync("sleep 2");
   }
@@ -1521,10 +1700,13 @@ const cmdRun = (name: string, mode: string = "full") => {
   console.log(`${c.cyan}Executando sync (${mode}) para ${name}...${c.reset}`);
 
   try {
-    execSync(`docker compose exec watcher bun run /app/watcher --mode ${mode}`, {
-      cwd: clientDir,
-      stdio: "inherit",
-    });
+    execSync(
+      `docker compose exec watcher bun run /app/watcher --mode ${mode}`,
+      {
+        cwd: clientDir,
+        stdio: "inherit",
+      }
+    );
   } catch {
     console.error(`${c.red}Erro ao executar sync${c.reset}`);
     process.exit(1);
@@ -1545,7 +1727,10 @@ const cmdStop = (name: string) => {
   console.log(`${c.yellow}Parando ${name}...${c.reset}`);
 
   try {
-    execSync("docker compose down", { cwd: getClientDir(name), stdio: "inherit" });
+    execSync("docker compose down", {
+      cwd: getClientDir(name),
+      stdio: "inherit",
+    });
     console.log(`${c.green}✓ Parado${c.reset}`);
   } catch {
     console.error(`${c.red}Erro ao parar container${c.reset}`);
@@ -1567,7 +1752,10 @@ const cmdStart = (name: string) => {
   console.log(`${c.cyan}Iniciando ${name}...${c.reset}`);
 
   try {
-    execSync("docker compose up -d", { cwd: getClientDir(name), stdio: "inherit" });
+    execSync("docker compose up -d", {
+      cwd: getClientDir(name),
+      stdio: "inherit",
+    });
     console.log(`${c.green}✓ Iniciado${c.reset}`);
   } catch {
     console.error(`${c.red}Erro ao iniciar container${c.reset}`);
@@ -1586,7 +1774,9 @@ const cmdRemove = async (name: string) => {
     process.exit(1);
   }
 
-  console.log(`${c.yellow}Isso vai remover o cliente '${name}' e todos os dados.${c.reset}`);
+  console.log(
+    `${c.yellow}Isso vai remover o cliente '${name}' e todos os dados.${c.reset}`
+  );
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -1641,11 +1831,16 @@ const cmdConfig = async (name: string) => {
 
   // Restart if running
   try {
-    const result = execSync(`docker ps -q -f "name=watcher-${name}"`, { encoding: "utf-8" }).trim();
+    const result = execSync(`docker ps -q -f "name=watcher-${name}"`, {
+      encoding: "utf-8",
+    }).trim();
     if (result) {
       console.log(`${c.cyan}Reiniciando container...${c.reset}`);
       execSync("docker compose down 2>/dev/null", { cwd: clientDir });
-      execSync("docker compose up -d --build", { cwd: clientDir, stdio: "inherit" });
+      execSync("docker compose up -d --build", {
+        cwd: clientDir,
+        stdio: "inherit",
+      });
     }
   } catch {}
 
@@ -1716,6 +1911,9 @@ const main = async () => {
 };
 
 main().catch((e) => {
-  log.error("Fatal error", { error: (e as Error).message, stack: (e as Error).stack?.split("\n").slice(0, 3).join(" | ") });
+  log.error("Fatal error", {
+    error: (e as Error).message,
+    stack: (e as Error).stack?.split("\n").slice(0, 3).join(" | "),
+  });
   process.exit(1);
 });
