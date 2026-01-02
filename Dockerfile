@@ -1,13 +1,23 @@
-FROM oven/bun:1-alpine
+# Product Watcher - Runtime Image
+# Apenas copia o binário pré-compilado
+#
+# Build:
+#   bun run build:linux
+#   docker build -t watcher .
+#
+# Push (exemplo):
+#   docker tag watcher registry.doxacode.com.br/watcher:latest
+#   docker push registry.doxacode.com.br/watcher:latest
 
-WORKDIR /app
+FROM alpine:3.19
 
-COPY package.json bun.lockb* ./
-RUN bun install --frozen-lockfile --production
+# Copia o binário pré-compilado
+COPY dist/watcher-linux-x64 /app/watcher
 
-COPY watcher.ts ./
+# Permissão de execução
+RUN chmod +x /app/watcher
 
-RUN mkdir -p /app/data
 WORKDIR /app/data
 
-CMD ["bun", "run", "/app/watcher.ts", "--daemon"]
+ENTRYPOINT ["/app/watcher"]
+CMD ["daemon"]

@@ -1,9 +1,10 @@
 #!/bin/bash
 # Product Watcher - Uninstall
-# curl -fsSL https://raw.githubusercontent.com/seu-user/cart-watcher/main/uninstall.sh | bash
+# curl -fsSL https://watcher.doxacode.com.br/uninstall.sh | bash
 
 WATCHER_HOME="$HOME/.watcher"
 INSTALL_DIR="/usr/local/bin"
+DOCKER_IMAGE="ghcr.io/doxacode/watcher"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -20,14 +21,14 @@ echo -e "${NC}"
 
 # List clients
 if [ -d "$WATCHER_HOME" ]; then
-    clients=$(ls -1 "$WATCHER_HOME" 2>/dev/null | grep -v "^src$" | grep -v "watcher-cli.sh")
-    if [ -n "$clients" ]; then
-        echo -e "${YELLOW}Clientes que serão removidos:${NC}"
-        echo "$clients" | while read -r name; do
-            [ -d "$WATCHER_HOME/$name" ] && echo -e "  ${RED}●${NC} $name"
-        done
-        echo ""
-    fi
+    echo -e "${YELLOW}Clientes que serão removidos:${NC}"
+    for dir in "$WATCHER_HOME"/*/; do
+        [ -d "$dir" ] || continue
+        [ -f "$dir/config.env" ] || continue
+        name=$(basename "$dir")
+        echo -e "  ${RED}●${NC} $name"
+    done
+    echo ""
 fi
 
 echo -e "${YELLOW}${BOLD}Isso vai remover o watcher e todos os clientes.${NC}"
@@ -55,6 +56,10 @@ sudo rm -f "$INSTALL_DIR/watcher"
 # Remove files
 echo -e "${CYAN}Removendo arquivos...${NC}"
 rm -rf "$WATCHER_HOME"
+
+# Remove Docker image
+echo -e "${CYAN}Removendo imagem Docker...${NC}"
+docker rmi "$DOCKER_IMAGE:latest" 2>/dev/null || true
 
 echo ""
 echo -e "${GREEN}════════════════════════════════════════${NC}"
